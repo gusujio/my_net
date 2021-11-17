@@ -1,12 +1,7 @@
 import numpy as np
 import pandas as pd
 import pickle
-import torch
-from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, classification_report, log_loss
 
-np.random.seed(0)
 
 def il_softmax(mas_pred):
     mas_exp = np.exp(mas_pred)
@@ -17,29 +12,26 @@ def il_softmax(mas_pred):
 def il_sigma(x):
     return 1 / (1 + np.exp(-x))
 
-def tr_log_loss_2(y_true1, y_pred1, y_pred0):
-    """Если мы подаем одну вероятность -то это вероятность пренадлежать к 1"""
-    """Если y_pred масив из двух вероятностей, то первая вероятность - вероятность к 0, а вторая к 1"""
-    return y_true1 * torch.log(y_pred1) + (1-y_true1) * torch.log(y_pred0)
 
 def il_log_loss(y_true, y_pred):
     """Если y_pred масив из двух вероятностей, то первая вероятность - вероятность о нуле?"""
     return np.mean(-(y_true * np.log(y_pred) + (1 - y_true) * np.log((1 - y_pred))))
-#     return np.mean(-((y_true * np.log(y_pred[:, 0]))[:,0] + (y_true * np.log(y_pred[:, 1]))[:,1]))
 
 
 class Neuron:
-    def __init__(self, sigma=False):
+    def __init__(self, sigma=False, random_state=None):
         self.sigma = sigma
         self.weights = 0
         self.result = None
         self.x = None
         self.weights_grad = None
+        self.random_state = random_state
 
     def __repr__(self):
         return 'Neuron'
 
     def pred(self, args):
+        np.random.seed(self.random_state)
         self.x = np.array([np.append(i, 1) for i in args])
         if isinstance(self.weights, int):
             self.weights = np.random.rand(self.x.shape[1]) + np.random.randint(-1, 1, self.x.shape[1]) # от -1 до 1
@@ -52,7 +44,8 @@ class Neuron:
 
 
 class Layers:
-    def __init__(self, n_neuron=None, sigma=False):
+    def __init__(self, n_neuron=None, sigma=False, random_state=None):
+        self.random_state = random_state
         self.sigma = sigma
         self.layer = n_neuron
 
@@ -67,7 +60,7 @@ class Layers:
     def layer(self, n_neuron):
         self.__layer = []
         for i in range(n_neuron):
-            self.__layer.append(Neuron(self.sigma))
+            self.__layer.append(Neuron(self.sigma, self.random_state))
 
     def __getitem__(self, item):
         if item < len(self.layer):
@@ -89,10 +82,11 @@ class Layers:
 
 
 class Net:
-    table_param = {}
-    mas_logloss = []
+    name_file = 'my_net.pickle'
+    plot_any_loss = []
 
     def __init__(self, n_hidden_layers, n_neurons=2, debug=False, **kwargs):
+        self.random_state = kwargs.get('random_state', None)
         self.net = n_hidden_layers, n_neurons
         self.debug = debug
         self.classification = kwargs.get('classification', True)
@@ -101,6 +95,9 @@ class Net:
         self.n_epochs = kwargs.get('n_epochs', 2000)
         self.lr = kwargs.get('lr', 0.01)
         self.min_err = kwargs.get('min_err', 0.05)
+        self.table_param = {}
+        self.mas_logloss = []
+        self.mas_valid_logloss = []
 
     def __iter__(self):
         """можем итерироваться по слоям"""
@@ -121,11 +118,11 @@ class Net:
         if n_hidden_layers != 2:
             raise ValueError("Недопустимое значение для n_hidden_layers")
 
-        self.__net = [Layers(1)]
+        self.__net = [Layers(1, random_state=self.random_state)]
         for i in range(n_hidden_layers):
-            self.__net.append(Layers(n_neurons, True))
+            self.__net.append(Layers(n_neurons, True, self.random_state))
 
-        self.__net.append(Layers(2))
+        self.__net.append(Layers(2, random_state=self.random_state))
 
     def forward(self, vec_data):
         """ Нужно для прямого распространения ошибки
@@ -148,14 +145,14 @@ class Net:
         """ переводим одномерный масив в двухмерные, нужно для удобного переумножения"""
         return np.array([[i] for i in mas])
 
-    def create_table(self, neuron, name):
+    def __create_table(self, neuron, name):
         if name not in self.table_param:
             self.table_param[name] = {'weights': [], 'x': [], 'res': [], 'res_m_tar': [], 'dir_res': []}
         self.table_param[name]['weights'].append(neuron.weights)
         self.table_param[name]['x'].append(neuron.x)
         self.table_param[name]['res'].append(neuron.result)
 
-    def grad_l3(self, target, indx_neuron):
+    def __grad_l3(self, target, indx_neuron):
         """Беру производну по функции ошибки кросс энтропии
         Функция активация- на последнем слое - Softmax"""
         if indx_neuron == 0:
@@ -166,7 +163,7 @@ class Net:
         self.table_param['l3']['res_m_tar'].append(res_m_tar)
         return res_m_tar
 
-    def grad_l2(self, indx_neuron):
+    def __grad_l2(self, indx_neuron):
         weights = self.on_in_man(np.array(self.table_param['l3']['weights'])[:, indx_neuron])
         sums = np.sum(weights * self.table_param['l3']['res_m_tar'], axis=0)
         res_neur = np.array(self.table_param['l2']['res'])
@@ -174,7 +171,7 @@ class Net:
         self.table_param['l2']['dir_res'].append(dir_res)
         return sums * dir_res
 
-    def grad_l1(self, indx_neuron):
+    def __grad_l1(self, indx_neuron):
         weights_l3 = np.array([[[j] for j in i] for i in np.array(self.table_param['l3']['weights'])[:, :-1]])
         weights_l2 = np.array([self.on_in_man(np.array(self.table_param['l2']['weights'])[:, indx_neuron]).tolist()] * 2)
         res_m_tar = weights_l3 * self.table_param['l2']['dir_res']
@@ -187,7 +184,7 @@ class Net:
         self.table_param['l1']['dir_res'].append(dir_res)
         return sums * dir_res
 
-    def grad_l0(self):
+    def __grad_l0(self):
         gr_1 = np.array(self.table_param['l2']['x'])[:, :, :-1]
         gr_1 = gr_1 * (1 - gr_1)
         gr = self.on_in_man(np.array(self.table_param['l2']['weights'])[:, :-1]) * gr_1## зеленное
@@ -198,21 +195,21 @@ class Net:
         br = np.array(self.table_param['l3']['res_m_tar']).T ## коричневое
         return np.sum(br * kr_skob, axis=1) * 10
 
-    def backprop(self, target):
+    def __backprop(self, target):
         """ Обратное распространение оишбки, находим производные по каждому слою
         """
         name_layers = ['l3', 'l2', 'l1', 'l0']
         for layer, name in zip(reversed(self.net), name_layers):
             for indx_neuron in range(len(layer)):
-                self.create_table(layer[indx_neuron], name)
+                self.__create_table(layer[indx_neuron], name)
                 if name == 'l3':
-                    res_grad = self.grad_l3(target, indx_neuron)
+                    res_grad = self.__grad_l3(target, indx_neuron)
                 elif name == 'l2':
-                    res_grad = self.grad_l2(indx_neuron)
+                    res_grad = self.__grad_l2(indx_neuron)
                 elif name == 'l1':
-                    res_grad = self.grad_l1(indx_neuron)
+                    res_grad = self.__grad_l1(indx_neuron)
                 else:
-                    res_grad = self.grad_l0()
+                    res_grad = self.__grad_l0()
                 layer[indx_neuron].weights_grad = np.mean(layer[indx_neuron].x.T * res_grad, axis=1)
 
     def step(self, lr=0.01):
@@ -221,21 +218,40 @@ class Net:
                 layer[indx_neuron].weights = layer[indx_neuron].weights - lr * layer[indx_neuron].weights_grad
         self.table_param.clear()
 
-    def fit(self, data, target):
+    def epoch_valid(self, data, target, epoch, loss, accuracy):
+        pred = self.forward(data)[:, 0]
+        valid_loss = self.function_error(target, pred)
+        self.mas_valid_logloss.append(valid_loss)
+        if self.debug:
+            print(f"epoch {epoch}/{self.n_epochs} - loss: {np.round(loss, 4)} "
+                  f"- valid_loss: {np.round(valid_loss, 4)} - accuracy: {round(accuracy, 4)}")
+
+    def fit(self, data, target, valid_data=None, valid_target=None):
+        """
+        Обучение нейронки
+        :valid_data and valid_target нужны для того, что бы посмотреть ошибку обучения на валидационных данных.
+        Эта ошибка будет хранится в mas_valid_logloss
+        """
         if isinstance(data, pd.DataFrame):
             data = data.values
+        exist_valid = valid_data is not None and valid_target is not None
         for epoch in range(1, self.n_epochs + 1):
-            pred = self.forward(data)
-            loss = self.function_error(target, pred[:, 0])
-            self.backprop(target)
+            pred = self.forward(data)[:, 0]
+            loss = self.function_error(target, pred)
+            accuracy = self.accuracy_score(target, [1 if i >= 0.5 else 0 for i in pred])
+            self.__backprop(target)
             self.step(self.lr)
-            if self.debug:
-                print(f"epoch {epoch}/{self.n_epochs} - loss: {loss}")
+            """Evaluate the learning phase with multiple metrics."""
+            if self.debug and not exist_valid:
+                print(f"epoch {epoch}/{self.n_epochs} - loss: {np.round(loss, 4)} - accuracy: {round(accuracy, 4)}")
             """#An historic of the metric obtained during training."""
             self.mas_logloss.append(loss)
+            if exist_valid:
+                self.epoch_valid(valid_data, valid_target, epoch, loss, accuracy)
             """ Early stopping"""
             if loss <= self.min_err:
                 break
+        self.plot_any_loss.append(self.mas_logloss)
 
     def predict(self, data):
         pred = self.forward(data)[:, 0]
@@ -244,114 +260,15 @@ class Net:
     def predict_proba(self, data):
         return self.forward(data)
 
+    def accuracy_score(self, true_value, pred_value):
+        return np.sum(true_value == pred_value) / len(true_value)
+
     def dump_net(self):
-        with open('my_net.pickle', 'wb') as f:
+        with open(self.name_file, 'wb') as f:
             pickle.dump(self, f)
 
     def load_net(self):
-        with open('my_net.pickle', 'rb') as f:
+        with open(self.name_file, 'rb') as f:
             model = pickle.load(f)
         return model
-
-
-
-
-
-
-
-
-# # print(np.random.rand(18))
-#
-# data = pd.read_csv("data.csv", header=None)
-# tagter = np.array([1 if i == 'M' else 0 for i in data[1]])
-# tagter[0] = 1
-# data = data.drop([0, 1], axis=1)
-# # data = StandardScaler().fit_transform(data)
-# data = StandardScaler().fit_transform(data)[:, 2:4]
-
-# data = data # временно
-# data = np.array([np.array([10, 2]), np.array([30, 4]), np.array([5, 6])])
-# tagter = np.array([1, 1, 0])
-"""тестирование Net fit"""
-# net = Net(2, 2, True, lr=0.001, min_err=0.05, n_epochs=100)
-# net.fit(data, tagter)
-# print(classification_report(tagter, net.predict(data)))
-# print(net.forward(data), tagter)
-# pd.DataFrame(net.mas_logloss).plot()
-# plt.xlabel('times')
-# plt.ylabel('log loss values')
-# plt.show()
-
-
-
-
-
-# data = np.array([np.array([1, 2]), np.array([5, 6]), np.array([9, 10])])
-# k = [[[j] for j in i] for i in data]
-# print(k[0])
-
-# """тестирование Net"""
-# data = np.array([np.array([1, 2]), np.array([5, 6]), np.array([9, 10])])
-# # print(data)
-# net = Net(2, 2)
-# res = net.forward(data)
-# # bc = net.backprop([1,1,0])
-# print(res)
-
-# net = Net(2, 2)
-# data = np.array([np.array([1, 2]), np.array([5, 6]), np.array([9, 10])])
-# net.fit(data, np.array([1,1,0]))
-# pd.DataFrame(net.mas_logloss).plot(title='th0')
-# plt.xlabel('times')
-# plt.ylabel('values')
-# plt.show()
-
-# print(res.shape, data.shape, res, sep='\n')
-# print(il_log_loss(np.array([1,0,1]), res))
-# print(np.concatenate(([1,2], [3,4])))
-# print(data * np.array([1, 2]))
-
-# """тестирование Layers"""
-# data = np.array([np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])])
-# la1 = Layers(1)
-# la2 = Layers(4)
-# la3 = Layers(4)
-# la4 = Layers(2)
-# print(la3.pred(data))
-
-# print(la.pred(data, True))
-
-# """тестирование Neuron.pred"""
-
-# ner = Neuron()
-# # arg = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
-# arg = np.array([np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])])
-# print(ner.pred(arg))
-# print(ner.weights)
-# # [11. 27.]
-
-# """тестирование il_log_loss"""
-# y_true = np.array([1, 0, 1, 0])
-# y_pred = np.array([0.8, .5, .2, .1])
-# orig_log_loss = log_loss(y_true, y_pred)
-# pred_log_loss = il_log_loss(y_true, y_pred)
-# print(f" orig_log_loss: {orig_log_loss}\n pred_log_loss: {pred_log_loss}")
-
-# """тестирование softmax"""
-
-# print(softmax(arg), sum(softmax(arg)))
-
-
-
-
-# loss = torch.nn.CrossEntropyLoss()
-# input = torch.randn(2, 5, requires_grad=True)
-# target = torch.randn(2, 5).softmax(dim=1)
-# output = loss(input, target)
-# output.backward()
-# print('input: ', input,'\n', 'target', target)
-# print(output)
-# print(cross_entropy(input, target))
-
-
 
